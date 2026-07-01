@@ -1,43 +1,46 @@
 -- ============================================================
---  Pet Simulator 99 ⚽ World Cup AutoKick + Auto Collect
+--  Pet Simulator 99 ⚽ World Cup AutoKick + Speed TP Collect
 --  Made by Manos | Matcha External
 --  Toggle UI: Insert Key
 -- ============================================================
 
-local Players    = game:GetService("Players")
+local Players     = game:GetService("Players")
 local localPlayer = Players.LocalPlayer
-local PlayerGui  = localPlayer:WaitForChild("PlayerGui")
-local StarterGui = game:GetService("StarterGui")
-local Workspace  = game:GetService("Workspace")
+local PlayerGui   = localPlayer:WaitForChild("PlayerGui")
+local StarterGui  = game:GetService("StarterGui")
+local Workspace   = game:GetService("Workspace")
+local CoreGui     = game:GetService("CoreGui")
 
--- ── State ────────────────────────────────────────────────────
 local autoKickRunning    = false
 local autoCollectRunning = false
 local resetDelay         = 2.5
-local collectRadius      = 50
+local kickTimeout        = 10
+local collectRadius      = 200
+local kickCount          = 0
+local orbsCollected      = 0
 local statusLabel        = nil
 local collectStatusLabel = nil
 local cachedBall         = nil
 local cachedPercent      = nil
-local kickCount          = 0
-local orbsCollected      = 0
+local collecting         = false
 
--- ── Helpers ──────────────────────────────────────────────────
-local function notify(title, text, duration)
+local function dbg(msg) print("[Manos Script] " .. tostring(msg)) end
+local function notify(title, text, dur)
     pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title = title,
-            Text = text,
-            Duration = duration or 5
-        })
+        StarterGui:SetCore("SendNotification", {Title=title, Text=text, Duration=dur or 5})
     end)
 end
 
-local function dbg(msg)
-    print("[Manos Script] " .. tostring(msg))
+local function setStatus(text)
+    if statusLabel then pcall(function() statusLabel:SetContent(text) end) end
+end
+local function setCollectStatus(text)
+    if collectStatusLabel then pcall(function() collectStatusLabel:SetContent(text) end) end
 end
 
--- ── UI Element Finder (Kick) ─────────────────────────────────
+-- ================================================================
+-- AUTO KICK (FROM USER'S PROVIDED SCRIPT)
+-- ================================================================
 local function findEventUI()
     for _, desc in ipairs(PlayerGui:GetDescendants()) do
         if desc:IsA("TextLabel") or desc:IsA("TextButton") then
@@ -117,7 +120,6 @@ local function getUIElements()
     return ballButton, percentLabel
 end
 
--- ── Position Validator ───────────────────────────────────────
 local function getValidPosition(btn)
     local bx = btn.AbsolutePosition.X
     local by = btn.AbsolutePosition.Y
@@ -131,7 +133,6 @@ local function getValidPosition(btn)
     return bx + bw / 2, by + bh / 2
 end
 
--- ── Read current percent safely ─────────────────────────────
 local function readPercent(label)
     local ok, val = pcall(function()
         return tonumber(label.Text:match("%d+"))
@@ -140,278 +141,6 @@ local function readPercent(label)
     return nil
 end
 
--- ── Orb Finder ──────────────────────────────────────────────
-local function getOrbsFolder()
-    local things = Workspace:FindFirstChild("__THINGS")
-    if not things then
-        dbg("__THINGS not found!")
-        return nil
-    end
-    
-    -- The soccer orbs are in SoccerYeetClient (dynamically changing children)
-    local soccerYeet = things:FindFirstChild("SoccerYeetClient")
-    if soccerYeet then
-        dbg("Found SoccerYeetClient with " .. #soccerYeet:GetChildren() .. " children")
-        -- Log what's inside on first scan
-        for _, child in ipairs(soccerYeet:GetChildren()) do
-            local pos = ""
-            if child:IsA("BasePart") then
-                pos = string.format(" @ (%.0f, %.0f, %.0f) Size: %.1f", child.Position.X, child.Position.Y, child.Position.Z, child.Size.Magnitude)
-            elseif child:IsA("Model") then
-                local p = child.PrimaryPart or child:FindFirstChildWhichIsA("BasePart")
-                if p then
-                    pos = string.format(" @ (%.0f, %.0f, %.0f)", p.Position.X, p.Position.Y, p.Position.Z)
-                end
-            end
-            dbg("  Yeet child: " .. child.Name .. " [" .. child.ClassName .. "]" .. pos)
-        end
-        return soccerYeet
-    end
-    
-    -- Fallback: check Ornaments (also has collectibles in PS99)
-    local ornaments = things:FindFirstChild("Ornaments")
-    if ornaments and #ornaments:GetChildren() > 0 then
-        dbg("Fallback: Using Ornaments folder (" .. #ornaments:GetChildren() .. " children)")
-        return ornaments
-    end
-    
-    -- Last resort: Orbs folder (sometimes populates late)
-    local orbs = things:FindFirstChild("Orbs")
-    if orbs and #orbs:GetChildren() > 0 then
-        return orbs
-    end
-    
-    dbg("No orb folder found with children!")
-    return nil
-end
-
-local function getCharacterRoot()
-    local char = localPlayer.Character
-    if not char then return nil end
-    return char:FindFirstChild("HumanoidRootPart")
-end
-
-local orbsFolderCache = nil
-local lastFolderScan = 0
-
-local function collectOrbs()
-    local hrp = getCharacterRoot()
-    if not hrp then return 0 end
-    
-    -- Re-scan folder every 5 seconds (orbs appear/disappear fast)
-    if not orbsFolderCache or not orbsFolderCache.Parent or (tick() - lastFolderScan > 5) then
-        orbsFolderCache = getOrbsFolder()
-        lastFolderScan = tick()
-    end
-    
-    if not orbsFolderCache then
-        return -1
-    end
-    
-    local playerPos = hrp.Position
-    local collected = 0
-    
-    -- Collect all children & descendants, safely checking for position
-    local parts = {}
-    local loggedOnce = false
-    
-    for _, obj in ipairs(orbsFolderCache:GetDescendants()) do
-        if obj:IsA("BasePart") then
-            -- Log first part's details for debugging
-            if not loggedOnce then
-                dbg("First BasePart found: " .. obj.Name .. " [" .. obj.ClassName .. "]")
-                local ok, pos = pcall(function() return obj.Position end)
-                if ok and pos then
-                    dbg("  Position: " .. tostring(pos))
-                else
-                    dbg("  Position NOT accessible: " .. tostring(pos))
-                end
-                local ok2, cf = pcall(function() return obj.CFrame end)
-                dbg("  CFrame accessible: " .. tostring(ok2))
-                loggedOnce = true
-            end
-            
-            local ok, pos = pcall(function() return obj.Position end)
-            if ok and pos then
-                local dist = (pos - playerPos).Magnitude
-                if dist <= collectRadius then
-                    table.insert(parts, {part = obj, dist = dist})
-                end
-            end
-        end
-    end
-    
-    -- If no BaseParts found, try with Models directly
-    if #parts == 0 then
-        for _, obj in ipairs(orbsFolderCache:GetChildren()) do
-            -- Log what we're actually dealing with
-            if not loggedOnce then
-                dbg("Child: " .. obj.Name .. " [" .. obj.ClassName .. "]")
-                for _, prop in ipairs({"Position", "CFrame", "PrimaryPart"}) do
-                    local ok, val = pcall(function() return obj[prop] end)
-                    dbg("  " .. prop .. ": ok=" .. tostring(ok) .. " val=" .. tostring(val))
-                end
-                loggedOnce = true
-            end
-            
-            -- Try to get a position from Models
-            if obj:IsA("Model") then
-                local ok, cf = pcall(function() return obj:GetPivot() end)
-                if ok and cf then
-                    local pos = cf.Position
-                    local dist = (pos - playerPos).Magnitude
-                    if dist <= collectRadius then
-                        local part = obj:FindFirstChildWhichIsA("BasePart")
-                        if part then
-                            table.insert(parts, {part = part, dist = dist, model = obj})
-                        end
-                    end
-                end
-            end
-        end
-    end
-    
-    -- Sort closest first
-    table.sort(parts, function(a, b) return a.dist < b.dist end)
-    
-    -- Teleport to each one + fire touch interest
-    for _, data in ipairs(parts) do
-        if not autoCollectRunning then break end
-        
-        local orb = data.part
-        if orb and orb.Parent then
-            pcall(function()
-                hrp.CFrame = orb.CFrame
-            end)
-            
-            pcall(function()
-                firetouchinterest(hrp, orb, 0)
-                task.wait(0.05)
-                firetouchinterest(hrp, orb, 1)
-            end)
-            
-            collected = collected + 1
-            task.wait(0.05)
-        end
-    end
-    
-    return collected
-end
-
--- ── UI Library ───────────────────────────────────────────────
-local Library = nil
-local success, err = pcall(function()
-    loadstring(game:HttpGet("https://scripts.wabisabi.mom/wabi-sabi-ui-lib.lua"))()
-    Library = WabiSabi
-end)
-
-if not success or not Library then
-    warn("[Manos Script] UI Library failed: " .. tostring(err))
-    notify("AutoKick by Manos", "UI Library failed. Running in auto mode!", 7)
-    autoKickRunning = true
-else
-    local Window = Library:CreateWindow({
-        Title       = "Pet Sim 99 ⚽",
-        SubTitle    = "by Manos",
-        Size        = Vector2.new(520, 460),
-        Resize      = true,
-        ConfigName  = "ps99_worldcup",
-        MinimizeKey = "Insert",
-    })
-
-    -- ── AutoKick Tab ─────────────────────────────────────────
-    local kickTab     = Window:AddTab({ Title = "AutoKick", Icon = "bot" })
-    local kickSection = kickTab:AddSection("AutoKick Settings")
-
-    kickSection:AddToggle({
-        Id       = "AutoKickToggle",
-        Title    = "Auto Kick",
-        Default  = false,
-        Callback = function(state)
-            autoKickRunning = state
-            if not state then
-                pcall(mouse1release)
-                kickCount = 0
-            end
-        end,
-    })
-
-    kickSection:AddSlider({
-        Id        = "ResetDelay",
-        Title     = "Reset Delay (Seconds)",
-        Min       = 1.0,
-        Max       = 5.0,
-        Default   = 2.5,
-        Rounding  = 1,
-        Callback  = function(value)
-            resetDelay = value
-        end
-    })
-
-    statusLabel = kickSection:AddParagraph({
-        Title   = "Status",
-        Content = "Idle — Toggle Auto Kick to start"
-    })
-
-    -- ── Auto Collect Tab ─────────────────────────────────────
-    local collectTab     = Window:AddTab({ Title = "Auto Collect", Icon = "phosphor-coins-bold" })
-    local collectSection = collectTab:AddSection("Auto Collect Orbs")
-
-    collectSection:AddToggle({
-        Id       = "AutoCollectToggle",
-        Title    = "Auto Collect Orbs",
-        Default  = false,
-        Callback = function(state)
-            autoCollectRunning = state
-            if not state then
-                orbsCollected = 0
-            end
-        end,
-    })
-
-    collectSection:AddSlider({
-        Id        = "CollectRadius",
-        Title     = "Collect Radius (studs)",
-        Min       = 20,
-        Max       = 200,
-        Default   = 50,
-        Rounding  = 0,
-        Callback  = function(value)
-            collectRadius = value
-        end
-    })
-
-    collectStatusLabel = collectSection:AddParagraph({
-        Title   = "Status",
-        Content = "Idle — Toggle Auto Collect to start"
-    })
-
-    -- ── Credits Tab ──────────────────────────────────────────
-    local creditsTab     = Window:AddTab({ Title = "Info", Icon = "phosphor-info-bold" })
-    local creditsSection = creditsTab:AddSection("Credits")
-
-    creditsSection:AddParagraph({
-        Title   = "Made by",
-        Content = "Manos ⚡\n\nFeatures:\n• Auto Kick (100% charge)\n• Auto Collect Orbs\n• Insert to toggle UI\n\nPowered by Matcha External + WabiSabi UI"
-    })
-    
-    Library:Notify("Manos Script loaded! Press [Insert] to toggle UI", "Success", 5)
-end
-
--- ── Status updaters ──────────────────────────────────────────
-local function setStatus(text)
-    if Library and statusLabel then
-        pcall(function() statusLabel:SetContent(text) end)
-    end
-end
-
-local function setCollectStatus(text)
-    if Library and collectStatusLabel then
-        pcall(function() collectStatusLabel:SetContent(text) end)
-    end
-end
-
--- ── Single Kick Cycle ────────────────────────────────────────
 local function doKick(ball, percent)
     local x, y = getValidPosition(ball)
     if not x then
@@ -427,23 +156,17 @@ local function doKick(ball, percent)
     mouse1press()
     setStatus("⚡ Charging kick...")
     
-    -- Wait for bar to reset from previous kick
     local resetStart = tick()
     while autoKickRunning do
         if tick() - resetStart > 3 then break end
         local p = readPercent(percent)
-        if p and p < 50 then
-            dbg("Bar reset at " .. p .. "%")
-            break
-        end
+        if p and p < 50 then break end
         task.wait(0.01)
     end
     
-    -- Monitor until 100%
     local startTime = tick()
     while autoKickRunning do
         if tick() - startTime > 6 then
-            dbg("Timeout waiting for 100%!")
             mouse1release()
             return false
         end
@@ -455,7 +178,6 @@ local function doKick(ball, percent)
                 mouse1release()
                 kickCount = kickCount + 1
                 setStatus("⚽ PERFECT KICK #" .. kickCount .. "! Waiting " .. resetDelay .. "s...")
-                dbg("Perfect kick #" .. kickCount .. " at 100%!")
                 task.wait(resetDelay)
                 return true
             end
@@ -467,17 +189,315 @@ local function doKick(ball, percent)
     return false
 end
 
--- ── Main Kick Loop ───────────────────────────────────────────
+-- ================================================================
+-- ORB COLLECTOR (HIGH-SPEED TP COLLECTOR)
+-- ================================================================
+local function getCharacterRoot()
+    local char = localPlayer.Character
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function collectOrbs()
+    local hrp = getCharacterRoot()
+    if not hrp or not hrp.Position then return 0 end
+
+    local playerPos = hrp.Position
+    local targets = {}
+    local seen = {}
+
+    local searchFolders = {}
+    local things = Workspace:FindFirstChild("__THINGS")
+    
+    if things then
+        table.insert(searchFolders, things)
+    end
+    if Workspace:FindFirstChild("__DEBRIS") then 
+        table.insert(searchFolders, Workspace.__DEBRIS) 
+    end
+
+    -- Look for event folders directly in Workspace
+    for _, child in ipairs(Workspace:GetChildren()) do
+        if child:IsA("Folder") or child:IsA("Model") then
+            local cName = child.Name:lower()
+            if cName:find("soccer") or cName:find("cup") or cName:find("yeet") or cName:find("event") then
+                table.insert(searchFolders, child)
+            end
+        end
+    end
+
+    local checkedCount = 0
+    for _, folder in ipairs(searchFolders) do
+        for _, obj in ipairs(folder:GetDescendants()) do
+            checkedCount = checkedCount + 1
+            if checkedCount % 150 == 0 then
+                task.wait() -- Yield to keep UI smooth and prevent menu lag
+            end
+
+            if obj:IsA("BasePart") then
+                local isOrb = false
+                local lowerName = obj.Name:lower()
+                
+                -- Skip the main kickable ball
+                if lowerName ~= "ball" and lowerName ~= "soccerball" and lowerName ~= "football" and lowerName ~= "soccer ball" then
+                    if tonumber(obj.Name) ~= nil then 
+                        isOrb = true
+                    elseif lowerName:find("orb") or lowerName:find("soccer") then 
+                        isOrb = true
+                    elseif obj.Parent and obj.Parent.Name == "Orbs" then 
+                        isOrb = true 
+                    end
+                end
+
+                if isOrb then
+                    local char = localPlayer.Character
+                    local unwanted = false
+                    
+                    -- Check if it belongs to any player's character
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        local pChar = p.Character
+                        if pChar and obj:IsDescendantOf(pChar) then
+                            unwanted = true
+                            break
+                        end
+                    end
+
+                    if not unwanted then
+                        -- Ancestry check to exclude unwanted items like eggs, pets, gifts, chests
+                        local current = obj
+                        for depth = 1, 4 do
+                            if not current then break end
+                            local cName = current.Name:lower()
+                            if cName:find("egg") or cName:find("pet") or cName:find("gift") or cName:find("box") or cName:find("chest") or cName:find("machine") or cName:find("hatch") or cName:find("shop") or cName:find("teleport") then
+                                  unwanted = true
+                                  break
+                            end
+                            current = current.Parent
+                        end
+                    end
+
+                    if not unwanted then
+                        local size = obj.Size
+                        local pos = obj.Position
+                        if size and pos and typeof(size) == "Vector3" and typeof(pos) == "Vector3" then
+                            if size.Magnitude < 15 and not seen[obj] then
+                                local dist = (pos - playerPos).Magnitude
+                                if dist <= collectRadius then
+                                    seen[obj] = true
+                                    table.insert(targets, { obj = obj, dist = dist, pos = pos, collected = false })
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(targets, function(a, b) return a.dist < b.dist end)
+    if #targets == 0 then return 0 end
+
+    local collectedCount = 0
+    local originalCFrame = hrp.CFrame 
+
+    local i = 1
+    collecting = true
+    while i <= #targets do
+        if not autoCollectRunning then break end
+        local primary = targets[i]
+        
+        if not primary.collected then
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end)
+            
+            -- HEIGHT OFFSET FIX: +1.5 to Y axis so we don't clip into ledges
+            hrp.CFrame = CFrame.new(primary.pos.X, primary.pos.Y + 1.5, primary.pos.Z)
+            
+            pcall(function()
+                if typeof(firetouchinterest) == "function" then
+                    firetouchinterest(hrp, primary.obj, 0)
+                    firetouchinterest(hrp, primary.obj, 1)
+                end
+            end)
+            primary.collected = true
+            collectedCount = collectedCount + 1
+
+            -- Collect any nearby neighbors within 15 studs in the same teleport step
+            for j = i + 1, #targets do
+                local neighbor = targets[j]
+                if not neighbor.collected then
+                    local distToPrimary = (neighbor.pos - primary.pos).Magnitude
+                    if distToPrimary <= 15 then
+                        pcall(function()
+                            if typeof(firetouchinterest) == "function" then
+                                firetouchinterest(hrp, neighbor.obj, 0)
+                                firetouchinterest(hrp, neighbor.obj, 1)
+                            end
+                        end)
+                        neighbor.collected = true
+                        collectedCount = collectedCount + 1
+                    end
+                end
+            end
+            
+            task.wait(0.01) -- Tiny delay per cluster teleport
+        end
+        i = i + 1
+    end
+
+    hrp.CFrame = originalCFrame
+    collecting = false
+    return collectedCount
+end
+
+-- ================================================================
+-- EVENT-DRIVEN INSTANT ORB COLLECTION (REALTIME SPAWNING)
+-- ================================================================
+local function handleNewDescendant(obj)
+    if not autoCollectRunning or collecting then return end
+    if not obj:IsA("BasePart") then return end
+    
+    local lowerName = obj.Name:lower()
+    if lowerName == "ball" or lowerName == "soccerball" or lowerName == "football" or lowerName == "soccer ball" then
+        return
+    end
+    
+    local isOrb = false
+    if tonumber(obj.Name) ~= nil then 
+        isOrb = true
+    elseif lowerName:find("orb") or lowerName:find("soccer") then 
+        isOrb = true
+    elseif obj.Parent and obj.Parent.Name == "Orbs" then 
+        isOrb = true 
+    end
+    
+    if not isOrb then return end
+    
+    local char = localPlayer.Character
+    if char and obj:IsDescendantOf(char) then return end
+    
+    for _, p in ipairs(Players:GetPlayers()) do
+        local pChar = p.Character
+        if pChar and obj:IsDescendantOf(pChar) then
+            return
+        end
+    end
+    
+    local current = obj
+    for depth = 1, 4 do
+        if not current then break end
+        local cName = current.Name:lower()
+        if cName:find("egg") or cName:find("pet") or cName:find("gift") or cName:find("box") or cName:find("chest") or cName:find("machine") or cName:find("hatch") or cName:find("shop") or cName:find("teleport") then
+            return
+        end
+        current = current.Parent
+    end
+    
+    local hrp = getCharacterRoot()
+    if not hrp or not hrp.Position then return end
+    
+    local pos = obj.Position
+    local dist = (pos - hrp.Position).Magnitude
+    if dist <= collectRadius then
+        collecting = true
+        local originalCFrame = hrp.CFrame
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            hrp.CFrame = CFrame.new(pos.X, pos.Y + 1.5, pos.Z)
+            if typeof(firetouchinterest) == "function" then
+                firetouchinterest(hrp, obj, 0)
+                firetouchinterest(hrp, obj, 1)
+            end
+        end)
+        task.wait(0.01)
+        hrp.CFrame = originalCFrame
+        orbsCollected = orbsCollected + 1
+        setCollectStatus("⚡ Instant Collect! (Total: " .. orbsCollected .. ")")
+        collecting = false
+    end
+end
+
+-- ================================================================
+-- WABISABI UI LIBRARY & MAIN LOOPS
+-- ================================================================
+local Library = nil
+local success, err = pcall(function()
+    loadstring(game:HttpGet("https://scripts.wabisabi.mom/wabi-sabi-ui-lib.lua"))()
+    Library = WabiSabi
+end)
+
+if not success or not Library then
+    autoKickRunning = true
+else
+    local Window = Library:CreateWindow({
+        Title = "⚽ PS99 World Cup", SubTitle = "by Manos",
+        Size = Vector2.new(500, 420), Resize = true,
+        ConfigName = "ps99_worldcup", MinimizeKey = "Insert",
+    })
+
+    local kickTab = Window:AddTab({ Title = "Auto Kick", Icon = "target" })
+    local kickSection = kickTab:AddSection("⚽ Kicker Controls")
+
+    kickSection:AddToggle({
+        Id = "AutoKickToggle", Title = "Enable Auto Kick", Default = false,
+        Callback = function(state)
+            autoKickRunning = state
+            if not state then 
+                pcall(mouse1release)
+                kickCount = 0
+            end
+        end,
+    })
+    kickSection:AddSlider({
+        Id = "ResetDelay", Title = "Delay Between Kicks (Sec)",
+        Min = 1.0, Max = 5.0, Default = 2.5, Rounding = 1,
+        Callback = function(value) resetDelay = value end
+    })
+    statusLabel = kickSection:AddParagraph({ Title = "Live Status", Content = "Waiting to start..." })
+
+    local collectTab = Window:AddTab({ Title = "Auto Collect", Icon = "coins" })
+    local collectSection = collectTab:AddSection("✨ Orb Collection")
+
+    collectSection:AddToggle({
+        Id = "AutoCollectToggle", Title = "Enable High-Speed TP", Default = false,
+        Callback = function(state)
+            autoCollectRunning = state
+            if not state then orbsCollected = 0 end
+        end,
+    })
+    collectSection:AddSlider({
+        Id = "CollectRadius", Title = "Scan Radius (Studs)",
+        Min = 50, Max = 500, Default = 250, Rounding = 0,
+        Callback = function(value) collectRadius = value end
+    })
+    collectStatusLabel = collectSection:AddParagraph({ Title = "Collection Status", Content = "Waiting to start..." })
+
+    task.spawn(function()
+        task.wait(1)
+        pcall(function()
+            for _, gui in ipairs(CoreGui:GetDescendants()) do
+                if gui:IsA("ImageButton") or gui:IsA("TextButton") then
+                    if gui.Size.X.Offset < 60 and gui.Size.Y.Offset < 60 and gui.Parent:IsA("ScreenGui") then
+                        gui.Visible = false
+                    end
+                end
+            end
+        end)
+    end)
+end
+
+-- THEIR Auto Kick Loop
 task.spawn(function()
     while true do
         task.wait(0.1)
         if autoKickRunning then
             local ball, percent = getUIElements()
-            
             if ball and percent then
                 local ok, err = pcall(doKick, ball, percent)
                 if not ok then
-                    dbg("Kick error: " .. tostring(err))
                     pcall(mouse1release)
                     task.wait(1)
                 end
@@ -491,30 +511,43 @@ task.spawn(function()
     end
 end)
 
--- ── Orb Collect Loop ─────────────────────────────────────────
+-- MY Orb Collect Loop (Background yield sweep)
 task.spawn(function()
     while true do
-        task.wait(0.3)
+        task.wait(1.5) -- Slower loop to save CPU, since ChildAdded handles instant collections!
         if autoCollectRunning then
             local ok, result = pcall(collectOrbs)
             if ok then
-                if result == -1 then
-                    setCollectStatus("⚠️ Orbs folder not found! Make sure you're in the Soccer area.")
-                    task.wait(3)
-                elseif result > 0 then
+                if result > 0 then
                     orbsCollected = orbsCollected + result
-                    setCollectStatus("✅ Collected " .. result .. " orbs! (Total: " .. orbsCollected .. ")")
+                    setCollectStatus("✅ Swept " .. result .. " orbs! (Total: " .. orbsCollected .. ")")
                 else
-                    setCollectStatus("🔍 Scanning... No orbs nearby (Radius: " .. collectRadius .. " studs) | Total: " .. orbsCollected)
+                    setCollectStatus("🔍 Scanning " .. collectRadius .. " studs... | Total: " .. orbsCollected)
                 end
             else
-                dbg("Collect error: " .. tostring(result))
-                setCollectStatus("⚠️ Error collecting orbs. Retrying...")
-                task.wait(1)
+                setCollectStatus("⚠️ Error: " .. tostring(result))
             end
         else
-            setCollectStatus("Idle — Toggle Auto Collect to start  |  Orbs: " .. orbsCollected)
+            setCollectStatus("Idle — Toggle to start | Orbs: " .. orbsCollected)
         end
     end
 end)
 
+-- Connect ChildAdded / DescendantAdded events to capture instant spawns
+task.spawn(function()
+    local things = Workspace:WaitForChild("__THINGS", 10)
+    if things then
+        things.DescendantAdded:Connect(function(obj)
+            pcall(handleNewDescendant, obj)
+        end)
+    end
+end)
+
+task.spawn(function()
+    local debris = Workspace:WaitForChild("__DEBRIS", 10)
+    if debris then
+        debris.DescendantAdded:Connect(function(obj)
+            pcall(handleNewDescendant, obj)
+        end)
+    end
+end)
